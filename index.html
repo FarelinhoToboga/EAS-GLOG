@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIGEAS — Equipamentos de Apoio de Solo</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<style>body{font-family:Inter,system-ui,sans-serif}</style>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+
+<!-- LOGIN -->
+<section id="login" class="hidden min-h-screen grid place-items-center bg-slate-900 p-4">
+  <form onsubmit="login(event)" class="bg-white rounded-2xl p-6 w-full max-w-sm space-y-3">
+    <div class="text-xs font-bold tracking-widest text-amber-600">SIGEAS</div>
+    <h1 class="text-xl font-bold">Equipamentos de Apoio de Solo</h1>
+    <input id="em" type="email" required placeholder="E-mail" class="w-full border rounded-lg p-2.5">
+    <input id="pw" type="password" required placeholder="Senha" class="w-full border rounded-lg p-2.5">
+    <div id="lerr" class="text-sm text-rose-600 min-h-5"></div>
+    <button class="w-full bg-slate-900 text-white rounded-lg py-2.5 font-semibold">Entrar</button>
+  </form>
+</section>
+
+<!-- APP -->
+<div id="app" class="hidden">
+  <header class="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center gap-3 sticky top-0 z-10">
+    <div class="font-bold tracking-wide">SIGEAS <span class="text-xs font-normal text-slate-400 hidden sm:inline">Equipamentos de Apoio de Solo</span></div>
+    <nav class="flex gap-1">
+      <button data-t="dash" onclick="go('dash')"></button>
+      <button data-t="eq" onclick="go('eq')"></button>
+    </nav>
+    <div class="ml-auto flex items-center gap-3 text-xs text-slate-400"><span id="usr"></span><button onclick="sb.auth.signOut().then(boot)" class="underline">Sair</button></div>
+  </header>
+
+  <main class="p-4 max-w-6xl mx-auto">
+    <div id="v-dash"></div>
+    <div id="v-eq" class="hidden">
+      <div class="flex flex-wrap gap-2 mb-3">
+        <input id="q" oninput="list()" placeholder="Pesquisar patrimônio, nome, tipo..." class="flex-1 min-w-48 border rounded-lg p-2 bg-white">
+        <select id="f" onchange="list()" class="border rounded-lg p-2 bg-white"><option value="">Todos os status</option><option>Disponível</option><option>Em manutenção</option><option>Baixado</option></select>
+        <button onclick="formEq()" class="bg-amber-400 font-semibold rounded-lg px-4 py-2">+ Equipamento</button>
+      </div>
+      <div class="bg-white rounded-xl border overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 text-xs uppercase text-slate-500"><tr><th class="p-3 text-left">Patrimônio</th><th class="p-3 text-left">Equipamento</th><th class="p-3 text-left hidden md:table-cell">Setor</th><th class="p-3 text-left">Status</th><th class="p-3 text-left">Preventiva</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="mod" onclick="if(event.target===this)close_()" class="hidden fixed inset-0 bg-black/50 z-20 grid place-items-center p-3"></div>
+<div id="toast" class="fixed bottom-4 right-4 bg-slate-900 text-white text-sm rounded-lg px-4 py-2 opacity-0 transition pointer-events-none"></div>
+
+<script>
+// ===== CONFIGURAÇÃO — cole os dados do seu projeto Supabase (Project Settings > API) =====
+const SUPABASE_URL = 'https://csmbnqbromklhuudgfrk.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_7L4YVoDBLE7qoSPLRl17nw_-ki8J_b3';
+const ALERTA_DIAS = 30; // antecedência do alerta de preventiva
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ST = ['Disponível','Em manutenção','Baixado'];
+const TP = ['Pane','Corretiva','Preventiva','Uso','Observação'];
+const TC = {Pane:'border-rose-500',Corretiva:'border-orange-400',Preventiva:'border-emerald-500',Uso:'border-sky-400','Observação':'border-slate-400'};
+const SC = {'Disponível':'emerald','Em manutenção':'amber','Baixado':'slate'};
+let eq = [], reg = [], view = 'dash', sel = null, user = '';
+
+// ---- datas e regras de manutenção ----
+const today = () => new Date().toLocaleDateString('en-CA');
+const addDays = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-CA'); };
+const diff = (a, b) => Math.round((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 864e5);
+const fmt = d => d ? d.split('-').reverse().join('/') : '—';
+const next = e => e.ultima_preventiva && e.periodicidade_dias ? addDays(e.ultima_preventiva, e.periodicidade_dias) : null;
+function prev(e) {
+  if (e.status === 'Baixado') return {k:'baixado', t:'Baixado', c:'slate'};
+  const n = next(e); if (!n) return {k:'sem', t:'Sem plano', c:'slate'};
+  const d = diff(n, today());
+  if (d < 0) return {k:'venc', t:`Vencida há ${-d}d`, c:'rose'};
+  if (d <= ALERTA_DIAS) return {k:'prox', t:`Vence em ${d}d`, c:'amber'};
+  return {k:'ok', t:`Em dia (${d}d)`, c:'emerald'};
+}
+const chip = p => `<span class="text-xs font-semibold rounded-full px-2 py-0.5 bg-${p.c}-100 text-${p.c}-700">${p.t}</span>`;
+const badge = s => chip({c: SC[s], t: s});
+const toast = m => { const t = $('toast'); t.textContent = m; t.style.opacity = 1; setTimeout(() => t.style.opacity = 0, 2500); };
+
+// ---- autenticação e dados ----
+async function login(ev) {
+  ev.preventDefault();
+  const {error} = await sb.auth.signInWithPassword({email: $('em').value, password: $('pw').value});
+  if (error) { $('lerr').textContent = error.message; return; }
+  boot();
+}
+async function boot() {
+  const {data} = await sb.auth.getSession();
+  $('login').classList.toggle('hidden', !!data.session);
+  $('app').classList.toggle('hidden', !data.session);
+  if (!data.session) return;
+  user = data.session.user.email; $('usr').textContent = user; load();
+}
+async function load() {
+  const [a, b] = await Promise.all([
+    sb.from('equipamentos').select('*').order('patrimonio'),
+    sb.from('registros').select('*').order('data', {ascending:false}).order('created_at', {ascending:false})
+  ]);
+  if (a.error || b.error) { toast((a.error || b.error).message); return; }
+  eq = a.data; reg = b.data; render();
+}
+
+// ---- navegação ----
+const tabc = a => 'px-3 py-1.5 text-sm font-semibold rounded-lg ' + (a ? 'bg-amber-400 text-slate-900' : 'text-slate-300 hover:bg-slate-700');
+function go(v) { view = v; render(); }
+function render() {
+  $('v-dash').classList.toggle('hidden', view !== 'dash');
+  $('v-eq').classList.toggle('hidden', view !== 'eq');
+  document.querySelectorAll('[data-t]').forEach(b => { b.textContent = b.dataset.t === 'dash' ? 'Dashboard' : 'Equipamentos'; b.className = tabc(b.dataset.t === view); });
+  view === 'dash' ? dash() : list();
+}
+
+// ---- dashboard ----
+function dash() {
+  const at = eq.filter(e => e.status !== 'Baixado');
+  const dp = eq.filter(e => e.status === 'Disponível').length, mn = eq.filter(e => e.status === 'Em manutenção').length;
+  const pc = at.length ? Math.round(dp / at.length * 100) : 0;
+  const pr = at.map(e => ({e, p: prev(e)}));
+  const venc = pr.filter(x => x.p.k === 'venc'), prox = pr.filter(x => x.p.k === 'prox');
+  const card = (t, v, c, s = '') => `<div class="bg-white rounded-xl border p-4"><div class="text-xs uppercase tracking-wider text-slate-500">${t}</div><div class="text-3xl font-bold ${c}">${v}</div><div class="text-xs text-slate-400">${s}</div></div>`;
+
+  // curva de carga de preventivas: próximos 6 meses (vencidas contam no mês atual)
+  const m = {}, b0 = new Date(today() + 'T12:00:00');
+  for (let i = 0; i < 6; i++) m[new Date(b0.getFullYear(), b0.getMonth() + i, 1).toLocaleDateString('en-CA').slice(0, 7)] = 0;
+  at.forEach(e => { const n = next(e); if (!n) return; const k = (n < today() ? today() : n).slice(0, 7); if (k in m) m[k]++; });
+  const mx = Math.max(1, ...Object.values(m));
+
+  // panes nos últimos 90 dias
+  const lim = addDays(today(), -90), pn = {};
+  reg.filter(r => r.tipo === 'Pane' && r.data >= lim).forEach(r => pn[r.equipamento_id] = (pn[r.equipamento_id] || 0) + 1);
+  const top = Object.entries(pn).sort((x, y) => y[1] - x[1]).slice(0, 5);
+
+  const alerta = x => `<button onclick="open_('${x.e.id}')" class="w-full flex justify-between items-center text-left py-1.5 border-b last:border-0 text-sm hover:bg-slate-50"><span><b>${esc(x.e.patrimonio)}</b> ${esc(x.e.nome)}</span>${chip(x.p)}</button>`;
+  $('v-dash').innerHTML = `
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    ${card('Disponibilidade', pc + '%', pc >= 80 ? 'text-emerald-600' : pc >= 60 ? 'text-amber-600' : 'text-rose-600', `${dp} de ${at.length} operacionais`)}
+    ${card('Em manutenção', mn, 'text-amber-600')}
+    ${card('Preventivas vencidas', venc.length, venc.length ? 'text-rose-600' : 'text-slate-800')}
+    ${card('Vencem em ' + ALERTA_DIAS + ' dias', prox.length, 'text-amber-600', `${eq.length - at.length} baixado(s)`)}
+  </div>
+  <div class="grid md:grid-cols-2 gap-3 mt-3">
+    <div class="bg-white rounded-xl border p-4"><h3 class="font-bold text-sm mb-2">Alertas de preventiva</h3>${[...venc, ...prox].map(alerta).join('') || '<p class="text-sm text-slate-400">Nenhum alerta.</p>'}</div>
+    <div class="bg-white rounded-xl border p-4"><h3 class="font-bold text-sm mb-2">Carga de preventivas — próximos 6 meses</h3>
+      <div class="flex items-end gap-2 h-32">${Object.entries(m).map(([k, v]) => `<div class="flex-1 text-center text-xs"><div class="font-semibold">${v}</div><div class="bg-amber-400 rounded-t" style="height:${v / mx * 90}px;min-height:2px"></div><div class="text-slate-500 mt-1">${new Date(k + '-01T12:00:00').toLocaleDateString('pt-BR', {month:'short'})}</div></div>`).join('')}</div></div>
+    <div class="bg-white rounded-xl border p-4 md:col-span-2"><h3 class="font-bold text-sm mb-2">Equipamentos com mais panes (90 dias)</h3>${top.map(([id, n]) => { const e = eq.find(x => x.id === id); return e ? `<button onclick="open_('${id}')" class="w-full flex justify-between py-1.5 border-b last:border-0 text-sm hover:bg-slate-50"><span><b>${esc(e.patrimonio)}</b> ${esc(e.nome)}</span><b class="text-rose-600">${n}</b></button>` : ''; }).join('') || '<p class="text-sm text-slate-400">Sem panes registradas no período.</p>'}</div>
+  </div>`;
+}
+
+// ---- lista ----
+function list() {
+  const q = $('q').value.toLowerCase(), f = $('f').value;
+  const rows = eq.filter(e => (!f || e.status === f) && `${e.patrimonio} ${e.nome} ${e.tipo || ''} ${e.setor || ''}`.toLowerCase().includes(q));
+  $('rows').innerHTML = rows.map(e => `<tr onclick="open_('${e.id}')" class="border-t hover:bg-amber-50 cursor-pointer"><td class="p-3 font-mono font-semibold">${esc(e.patrimonio)}</td><td class="p-3">${esc(e.nome)}<div class="text-xs text-slate-400">${esc(e.tipo || '')}</div></td><td class="p-3 hidden md:table-cell">${esc(e.setor || '—')}</td><td class="p-3">${badge(e.status)}</td><td class="p-3">${chip(prev(e))}<div class="text-xs text-slate-400">${fmt(next(e))}</div></td></tr>`).join('') || '<tr><td colspan="5" class="p-6 text-center text-slate-400">Nenhum equipamento.</td></tr>';
+}
+
+// ---- modais ----
+const modal = h => { $('mod').innerHTML = `<div class="bg-white rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5">${h}</div>`; $('mod').classList.remove('hidden'); };
+const close_ = () => $('mod').classList.add('hidden');
+const inp = (id, l, v, t = 'text') => `<label class="text-xs font-semibold">${l}<input id="${id}" type="${t}" value="${esc(v)}" ${id === 'patrimonio' || id === 'nome' ? 'required' : ''} class="w-full border rounded-lg p-2 mt-1 font-normal text-sm"></label>`;
+
+function formEq(id) {
+  const e = eq.find(x => x.id === id) || {status:'Disponível'};
+  modal(`<h2 class="font-bold text-lg mb-3">${id ? 'Editar' : 'Novo'} equipamento</h2>
+  <form onsubmit="saveEq(event,'${id || ''}')" class="grid grid-cols-2 gap-3">
+    ${inp('patrimonio', 'Patrimônio / Nº', e.patrimonio)}${inp('nome', 'Nome', e.nome)}
+    ${inp('tipo', 'Tipo (ex.: GPU, trator, escada)', e.tipo)}${inp('setor', 'Setor / Local', e.setor)}
+    <label class="text-xs font-semibold">Status<select id="status" class="w-full border rounded-lg p-2 mt-1 font-normal text-sm">${ST.map(s => `<option ${s === e.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    ${inp('periodicidade_dias', 'Preventiva a cada (dias)', e.periodicidade_dias, 'number')}
+    ${inp('ultima_preventiva', 'Última preventiva', e.ultima_preventiva, 'date')}
+    <label class="text-xs font-semibold col-span-2">Observações<textarea id="obs" rows="2" class="w-full border rounded-lg p-2 mt-1 font-normal text-sm">${esc(e.obs)}</textarea></label>
+    <div class="col-span-2 flex gap-2 justify-end"><button type="button" onclick="close_()" class="px-4 py-2 border rounded-lg text-sm">Cancelar</button><button class="px-4 py-2 bg-slate-900 text-white rounded-lg font-semibold text-sm">Salvar</button></div>
+  </form>`);
+}
+async function saveEq(ev, id) {
+  ev.preventDefault();
+  const g = k => $(k).value.trim() || null;
+  const o = {patrimonio: g('patrimonio'), nome: g('nome'), tipo: g('tipo'), setor: g('setor'), status: $('status').value,
+    periodicidade_dias: g('periodicidade_dias') ? +$('periodicidade_dias').value : null, ultima_preventiva: g('ultima_preventiva'), obs: g('obs')};
+  const r = id ? await sb.from('equipamentos').update(o).eq('id', id) : await sb.from('equipamentos').insert(o);
+  if (r.error) return toast(r.error.message);
+  close_(); await load(); toast('Salvo');
+}
+
+function open_(id) {
+  sel = id;
+  const e = eq.find(x => x.id === id), h = reg.filter(r => r.equipamento_id === id);
+  modal(`<div class="flex justify-between items-start gap-3"><div><div class="font-mono text-sm text-slate-500">${esc(e.patrimonio)}</div><h2 class="font-bold text-xl">${esc(e.nome)}</h2><div class="text-xs text-slate-500">${esc(e.tipo || '')} · ${esc(e.setor || '')}</div></div><div class="text-right space-y-1">${badge(e.status)}<div>${chip(prev(e))}</div></div></div>
+  <div class="text-sm mt-3 grid grid-cols-3 gap-2"><div>Periodicidade<b class="block">${e.periodicidade_dias ? e.periodicidade_dias + ' dias' : '—'}</b></div><div>Última preventiva<b class="block">${fmt(e.ultima_preventiva)}</b></div><div>Próxima<b class="block">${fmt(next(e))}</b></div></div>
+  ${e.obs ? `<p class="text-sm bg-slate-50 rounded p-2 mt-3">${esc(e.obs)}</p>` : ''}
+  <form onsubmit="addReg(event)" class="mt-4 border rounded-xl p-3 grid grid-cols-2 gap-2 bg-amber-50/50">
+    <div class="col-span-2 text-xs font-bold uppercase text-slate-500">Novo registro</div>
+    <select id="rt" onchange="sugere()" class="border rounded-lg p-2 text-sm">${TP.map(t => `<option>${t}</option>`).join('')}</select>
+    <input id="rd" type="date" value="${today()}" class="border rounded-lg p-2 text-sm">
+    <textarea id="rx" required rows="2" placeholder="Descrição (defeito, serviço realizado, observação...)" class="col-span-2 border rounded-lg p-2 text-sm"></textarea>
+    <label class="text-xs">Status após o registro<select id="rs" class="w-full border rounded-lg p-2 text-sm"><option value="">Manter (${e.status})</option>${ST.map(s => `<option>${s}</option>`).join('')}</select></label>
+    <button class="self-end bg-slate-900 text-white rounded-lg py-2 font-semibold text-sm">Registrar</button>
+  </form>
+  <h3 class="font-bold text-sm mt-4 mb-1">Histórico</h3>
+  <div class="space-y-1">${h.map(r => `<div class="text-sm border-l-4 ${TC[r.tipo]} pl-2 py-1"><b>${r.tipo}</b> · ${fmt(r.data)} <span class="text-xs text-slate-400">${esc(r.autor || '')}</span><div class="text-slate-600">${esc(r.descricao)}</div></div>`).join('') || '<p class="text-sm text-slate-400">Sem registros.</p>'}</div>
+  <div class="flex justify-between mt-4"><button onclick="formEq('${id}')" class="text-sm text-slate-600 underline">Editar cadastro</button><button onclick="close_()" class="px-4 py-2 border rounded-lg text-sm">Fechar</button></div>`);
+}
+function sugere() { $('rs').value = {Pane:'Em manutenção', Corretiva:'Disponível', Preventiva:'Disponível'}[$('rt').value] || ''; }
+async function addReg(ev) {
+  ev.preventDefault();
+  const t = $('rt').value, d = $('rd').value, s = $('rs').value, e = eq.find(x => x.id === sel);
+  let r = await sb.from('registros').insert({equipamento_id: sel, tipo: t, data: d, descricao: $('rx').value.trim(), autor: user});
+  if (r.error) return toast(r.error.message);
+  const u = {};
+  if (s) u.status = s;
+  if (t === 'Preventiva' && (!e.ultima_preventiva || d > e.ultima_preventiva)) u.ultima_preventiva = d;
+  if (Object.keys(u).length) { r = await sb.from('equipamentos').update(u).eq('id', sel); if (r.error) return toast(r.error.message); }
+  await load(); open_(sel); toast('Registrado');
+}
+
+boot();
+</script>
+</body>
+</html>
